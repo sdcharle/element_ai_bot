@@ -18,7 +18,7 @@ pip install -r requirements.txt
 python element_bot/matrix_bot_ai.py
 ```
 
-It has typically been run in the background with `nohup`, which writes the large `nohup.out` files. There is no test suite (`element_bot/tests/` is empty), no linter config, and no build step.
+In production it runs on a Raspberry Pi as the systemd service `element-bot`. `deploy/install_service.sh` generates the unit file and reads secrets from `/etc/element-bot.env` (template: `deploy/element-bot.env.example`). The README has the Pi setup steps. Logs go to `journalctl -u element-bot`. There is no test suite (`element_bot/tests/` is empty), no linter config, and no build step.
 
 Standalone smoke-test scripts:
 - `element_bot/element_bot/openai_test_only.py`: one synchronous OpenAI call
