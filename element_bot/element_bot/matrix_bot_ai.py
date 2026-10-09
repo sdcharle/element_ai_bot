@@ -71,7 +71,7 @@ cooldown_period = 60  # 1 minute cooldown after hitting rate limits
 # Dictionary to store active timers
 active_timers = {}
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
 def call_particle_function(argument="triggered"):
