@@ -1,2 +1,14 @@
-element_vanv/*
+# Virtual environments
+element_venv/
+venv/
+.venv/
 
+# Python
+__pycache__/
+*.py[cod]
+
+# Logs
+nohup.out
+
+# macOS
+.DS_Store
