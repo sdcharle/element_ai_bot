@@ -1,5 +1,6 @@
 import os
 import logging
+import sys
 import time
 from openai import OpenAI  # Changed to synchronous client for simplicity
 
@@ -7,13 +8,16 @@ from openai import OpenAI  # Changed to synchronous client for simplicity
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# Get OpenAI API key from environment
-api_key = os.environ.get("BOT_OPENAI_API_KEY")
+# Get OpenRouter API key from environment
+api_key = os.environ.get("OPENROUTER_API_KEY")
 if not api_key:
-    raise EnvironmentError("Missing required environment variable: BOT_OPENAI_API_KEY")
+    raise EnvironmentError("Missing required environment variable: OPENROUTER_API_KEY")
 
-# Initialize OpenAI client
-client = OpenAI(api_key=api_key)
+# OpenRouter speaks the OpenAI API
+client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key)
+
+# Pass a model ID as the first argument to test a specific model
+MODEL = sys.argv[1] if len(sys.argv) > 1 else "google/gemma-4-31b-it:free"
 
 # System prompt
 SYSTEM_PROMPT = """
@@ -22,19 +26,19 @@ Be concise, informative, and engaging in your responses.
 """
 
 def test_openai_call(message="Hi there, can you help me?"):
-    """Simple function to test OpenAI API call"""
-    logger.info("Starting OpenAI API test")
+    """Simple function to test an OpenRouter API call"""
+    logger.info("Starting OpenRouter API test")
     
     try:
         # Add a small delay before making the call
         time.sleep(1)
         
         # Make the API call
-        logger.info(f"Sending request to OpenAI API with message: {message}")
+        logger.info(f"Sending request to {MODEL} with message: {message}")
         start_time = time.time()
         
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model=MODEL,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": message}
@@ -50,7 +54,7 @@ def test_openai_call(message="Hi there, can you help me?"):
         return content
         
     except Exception as e:
-        logger.error(f"Error calling OpenAI API: {str(e)}")
+        logger.error(f"Error calling OpenRouter API: {str(e)}")
         return f"Error: {str(e)}"
 
 if __name__ == "__main__":

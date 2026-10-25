@@ -6,7 +6,7 @@ import random
 import requests
 import re
 from nio import AsyncClient, RoomMessageText, SyncResponse
-from openai import AsyncOpenAI, RateLimitError
+from openai import AsyncOpenAI, APIStatusError, AuthenticationError, RateLimitError
 
 # Get environment variables for sensitive information
 MATRIX_SERVER = os.environ.get("MATRIX_SERVER", "https://matrix.org")
@@ -14,9 +14,23 @@ MATRIX_USER = os.environ.get("MATRIX_USER", "@steely-dan:matrix.org")
 MATRIX_PASSWORD = os.environ.get("MATRIX_PASSWORD")
 MATRIX_ROOM_ALIAS = os.environ.get("MATRIX_ROOM_ALIAS", "#Bots_sdc2:matrix.org")
 
-# OpenAI configuration from environment variables
-BOT_OPENAI_API_KEY = os.environ.get("BOT_OPENAI_API_KEY")
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-nano")
+# OpenRouter configuration from environment variables
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+# Free models, tried in order. OpenRouter rotates free models in and out, so if one
+# disappears or is overloaded the next one is used. "openrouter/free" is OpenRouter's
+# own router that picks any currently available free model; keep it last as a catch-all.
+# Override with a comma-separated OPENROUTER_MODELS env var.
+DEFAULT_MODELS = [
+    "google/gemma-4-31b-it:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "openrouter/free",
+]
+OPENROUTER_MODELS = [
+    m.strip() for m in os.environ.get("OPENROUTER_MODELS", "").split(",") if m.strip()
+] or DEFAULT_MODELS
 
 PARTICLE_DEVICE_ID = os.environ.get("PARTICLE_DEVICE_ID")
 PARTICLE_ACCESS_TOKEN = os.environ.get("PARTICLE_ACCESS_TOKEN")
@@ -40,7 +54,7 @@ If the message has nothing to do with time or timer, just say something friendly
 # Check for required environment variables
 required_vars = {
     "MATRIX_PASSWORD": MATRIX_PASSWORD,
-    "BOT_OPENAI_API_KEY": BOT_OPENAI_API_KEY
+    "OPENROUTER_API_KEY": OPENROUTER_API_KEY
 }
 
 missing_vars = [var for var, value in required_vars.items() if not value]
@@ -50,8 +64,14 @@ if missing_vars:
 # Matrix client setup
 client = AsyncClient(MATRIX_SERVER, MATRIX_USER)
 
-# OpenAI client setup
-openai_client = AsyncOpenAI(api_key=BOT_OPENAI_API_KEY)
+# OpenRouter speaks the OpenAI API. SDK retries are off so a failing model
+# falls through to the next one right away instead of being retried in place.
+openai_client = AsyncOpenAI(
+    base_url=OPENROUTER_BASE_URL,
+    api_key=OPENROUTER_API_KEY,
+    timeout=30,
+    max_retries=0,
+)
 
 # Rate limiting variables
 last_api_call = 0
@@ -150,8 +170,47 @@ def set_timer(seconds, room_id):
     
     return timer_id
 
+async def try_models(user_message):
+    """Try each model in OPENROUTER_MODELS in order until one answers.
+
+    Returns the reply text, or None if every model failed. Raises RateLimitError if
+    every model failed and at least one of them was rate limited, so the caller can back off.
+    Auth and billing errors (401/402) are raised as-is since no other model will fix them.
+    """
+    rate_limited = None
+    for model in OPENROUTER_MODELS:
+        try:
+            response = await openai_client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_message}
+                ]
+            )
+            content = response.choices[0].message.content if response.choices else None
+            if content and content.strip():
+                if model != OPENROUTER_MODELS[0]:
+                    logger.warning(f"Answered by fallback model {response.model or model}")
+                return content.strip()
+            logger.warning(f"Model {model} returned an empty reply, trying next model")
+        except AuthenticationError:
+            raise
+        except RateLimitError as e:
+            logger.warning(f"Model {model} is rate limited, trying next model: {e}")
+            rate_limited = e
+        except APIStatusError as e:
+            if e.status_code == 402:
+                raise
+            # 404 usually means the model was rotated out; update OPENROUTER_MODELS
+            logger.warning(f"Model {model} failed with HTTP {e.status_code}, trying next model: {e}")
+        except Exception as e:
+            logger.warning(f"Model {model} failed, trying next model: {e}")
+    if rate_limited:
+        raise rate_limited
+    return None
+
 async def get_ai_response(user_message):
-    """Get a response from the OpenAI API with improved rate limiting and error handling."""
+    """Get a response from OpenRouter with rate limiting, model fallback, and error handling."""
     global last_api_call, in_cooldown, cooldown_until
     
     now = time.time()
@@ -181,15 +240,12 @@ async def get_ai_response(user_message):
     
     for attempt in range(max_retries):
         try:
-            logging.info(f"Attempt {attempt+1}/{max_retries} to call OpenAI API")
-            response = await openai_client.chat.completions.create(
-                model=OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_message}
-                ]
-            )
-            return response.choices[0].message.content
+            logging.info(f"Attempt {attempt+1}/{max_retries} to call OpenRouter")
+            response = await try_models(user_message)
+            if response is None:
+                logging.error("Every model in OPENROUTER_MODELS failed")
+                return "Sorry, none of my AI models are answering right now. Please try again later."
+            return response
         
         except RateLimitError as e:
             if attempt < max_retries - 1:
@@ -230,11 +286,12 @@ async def message_callback(room, event):
     
     logger.info(f"Processing new message in {room.room_id} from {event.sender}: {event.body}")
     
-    # Get response from OpenAI
+    # Get response from OpenRouter
     response = await get_ai_response(event.body)
     
     # Check if the response is a timer request (matching {"time":X})
-    timer_match = re.match(r'^\s*{"time":(\d+)}\s*$', response)
+    # Free models sometimes wrap the JSON in code fences or add spaces, so search loosely
+    timer_match = re.search(r'\{\s*"time"\s*:\s*(\d+)\s*\}', response)
     if timer_match:
         try:
             # Extract timer duration
